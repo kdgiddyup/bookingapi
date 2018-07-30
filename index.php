@@ -472,8 +472,6 @@ else if ($requested === "beaufort") {
 }
 else if ($requested === "lexington") {
     // this is a call from a front-end,
-    // so fetch cached data
-
     if (!file_exists($lex_file)) {
         $data = new stdClass();
         $data->success = false;
