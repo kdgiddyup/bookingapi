@@ -3,16 +3,21 @@
  * Search and display recent confinement data
  * for Beaufort County and Lexington County detention centers.
  * 
- * Version 2.0 combines previously separate processes into a single script switchable based on a URL query.
+ * Version 2.1 adds logic to handle script trigger via cronjob
  *
  * LICENSE: None.
  *
  * @author      Kelly Davis <kellydavis1974 at gmail dot com> 
- * @version     Release 2.0
- * @since       File available since Release 1.0
+ * @version     Release 2.1
+ * @since       File available since Release 2.0
  */
 
- // allow cross origin resource sharing
+
+// cron job commands would be something like:
+//  php -q /var/www/html/bookings.thestate.com/index.php?requested=beaufort
+//  php -q /var/www/html/bookings.thestate.com/index.php?requested=lexington
+
+// allow cross origin resource sharing
 header("Access-Control-Allow-Origin: *");
 
 // allow script to run for server maximum, for larger record requests
@@ -30,10 +35,126 @@ $start= isset($_GET["start"]) ? -$_GET["start"] : 0;
 $end = isset($_GET["end"]) ? -$_GET["end"] : 0;
 
 $data = array();
+$beaufort_file = dirname(__FILE__).'/cache/beaufortcache.txt';
+$lex_file = dirname(__FILE__).'/cache/lexcache.txt';
+$startTarget = strtotime("-90 days 0:0:0", strtotime('now'));
+$endTarget = strtotime("0 days 0:0:0", strtotime('now'));
+$userStart = strtotime("$start days 0:0:0", strtotime('now'));
+$userEnd = strtotime("$end days 0:0:0", strtotime('now'));
+/* debug */
+//$test = array();
 
-if ($requested === "lexington") {
-    // we'll cache this data every 3 hours
-    $file = dirname(__FILE__).'/cache/lexcache.txt';
+
+if ($requested === "all") {
+    // this is a call from the cron job
+    // we're getting fresh data from all sources 
+    // to update our cache files
+
+    // start with Beaufort
+    $sources = array(
+        0 => array(
+            'agency'	=> 'Beaufort County',
+            //'url'		=> 'http://mugshots.bcgov.net/booked3.xml'
+            'url'		=> 'http://mugshots.bcgov.net/booked90.xml'
+        )
+    );
+
+    if (!file_exists('cache')){
+        mkdir('cache');
+    }
+
+    /*  App  */
+    // start scraping data from this source
+    $i = 0;
+    foreach ($sources as $source) {
+        $data[$i]['agency'] = $source['agency'];
+        $data[$i]['url'] = $source['url'];
+        $data[$i]['success'] = true;
+        $xml = simplexml_load_file($source['url']);
+        $data[$i]['data'] = array();
+        $j = 0;
+        foreach ($xml->ins->in as $inmate) {
+            $booked = date_create_from_format('G:i:s m/d/y', (string) $inmate->bd);
+            $timestamp = strtotime($booked->setTime(0, 0, 0)->format('Y-m-d H:i:s'));
+
+            // Only process inmates for the date target window.
+            if ($timestamp >= $startTarget && $timestamp <= $endTarget) {
+
+            /* debug */
+                //$test[] = $inmate;
+
+                $name_last = (string) $inmate->nl;
+                $name_first = (string) $inmate->nf;
+                $name_middle = (string) $inmate->nm;
+
+                $data[$i]['data'][$j]['last'] = $name_last;
+                $data[$i]['data'][$j]['first'] = $name_first;
+                $data[$i]['data'][$j]['middle'] = $name_middle;
+
+
+                // Address.
+                $data[$i]['data'][$j]['city'] = (string) $inmate->csz;
+
+                // Race
+                $data[$i]['data'][$j]['race'] = (string) explode(" / ", $inmate->racegen)[0];
+            
+                // Gender
+                $data[$i]['data'][$j]['sex'] = (string) explode(" / ", $inmate->racegen)[1];
+
+                // Date of birth. Needs a little wrangling because of two-digit pre-epoch years;
+                // strtotime() is not reliable since it maps values between 0-69 to 2000-2069
+                // and values between 70-100 to 1970-2000.
+                // Helped here by fact that we also get their age so we can just subtract
+                // age from current year to yield birth year
+                $dob = explode("/", $inmate->dob);
+                $inmate->dob = $dob[0]."/".$dob[1]."/".(date("Y") - $inmate->age);
+                $data[$i]['data'][$j]['dob'] = (string) date("M j, Y", strtotime($inmate->dob));
+            
+                // Age.
+                $data[$i]['data'][$j]['age'] = (string) $inmate->age;
+
+                // Height.
+                $data[$i]['data'][$j]['height'] = (string) $inmate->ht;
+
+                // Weight.
+                $data[$i]['data'][$j]['weight'] = (string) $inmate->wt;
+
+                // Mugshot: make sure it's an actual image file.
+                $url_mug = (string) $inmate->image1['src'];
+                if (preg_match('/\.(jpeg|jpg|png|gif)$/i', $url_mug)) {
+                    $data[$i]['data'][$j]['photo'] = $url_mug;
+                }
+                $data[$i]['data'][$j]['timestamp'] = $timestamp;
+                // arrest info
+                // is there any?
+                if (array_key_exists("ar", $inmate)) {
+                    $data[$i]['data'][$j]['arrestinfo'][]['present'] = (boolean) true;
+                    $data[$i]['data'][$j]['arrestinfo'][] = $inmate->ar;
+                }
+                // Booking number.
+                $data[$i]['data'][$j]['booknum'] = (string) $inmate->bn;
+            
+                // Booking date and time.
+                $data[$i]['data'][$j]['booktime'] = (string) date("g:i a, M j, Y", strtotime($inmate->bd));
+
+                // Release date
+                $data[$i]['data'][$j]['reldate'] = ($inmate->dtout == "Confined") ? (string) "Confined" : (string) date("g:i a", strtotime($inmate->tmout)).", ".date("M j, Y", strtotime($inmate->dtout));
+            
+                // Inmate number.
+                $data[$i]['data'][$j]['inmatenum'] = (string) $inmate->nn;
+
+                $j++;
+            }
+        }
+        $i++;
+    }
+    // cache this 90 days' worth of data
+    $data[0]['cached'] = false;
+    $data_to_cache = json_encode($data[0],true);
+    file_put_contents($beaufort_file,$data_to_cache);
+
+
+    // Now let's do Lexington
 
     $sources = array(
         0 => array(
@@ -47,27 +168,10 @@ if ($requested === "lexington") {
     );
     if (!file_exists('tmp'))
         mkdir('tmp');
-    if (!file_exists('cache'))
-        mkdir('cache');
-
-
-    // deploy: change -2 to -90
-    $startTarget = strtotime("-90 days 0:0:0", strtotime('now'));
-    $endTarget = strtotime("0 days 0:0:0", strtotime('now'));
-    $userStart = strtotime("$start days 0:0:0", strtotime('now'));
-    $userEnd = strtotime("$end days 0:0:0", strtotime('now'));
-
-    /* debug */
-    //$test = array();
 
     /*  App  */
-
-    // does the cache file exist, or is it stale 
-    // (let's say, more than 2 hours old?
-    if (!file_exists($file) || time()-filemtime($file) > 3*3600 ){
     $i = 0;
-    foreach ( $sources as $source )
-    {
+    foreach ( $sources as $source ) {
         /* curl init */
         /* debug */
         // logging headers
@@ -332,195 +436,76 @@ if ($requested === "lexington") {
     };
     // cache this 90 days' worth of data
     $data_to_cache = json_encode($data[0],false);
-    file_put_contents($file,$data_to_cache);
-
-    // send back only data requested
-    $inmateData = $data[0]['data'];
-    $data[0]['data']= Array();
-
-    foreach ($inmateData as $inmate) {
-        if (strtotime($inmate->{'disp_arrest_date'}) >= $userStart && strtotime($inmate->{'disp_arrest_date'}) < $userEnd) {
-            $data[0]['data'][] = $inmate;
-        };
-    };
-    header('Content-Type: application/json');
-    echo json_encode( $data[0] );
-    } // end cache does not exist condition
-    // the cached file exists and is young
-    else {
-        // get the cached data
-        $data = json_decode(file_get_contents($file));
-        // flag this as sourced from cache
-        $data->cached = true;
+    file_put_contents($lex_file,$data_to_cache);
+}
+else if ($requested === "beaufort") {
+    // this is a call from a front-end, 
+    // so fetch cached data
     
+    if (!file_exists($beaufort_file)) {
+         $data = new stdClass();
+         $data->success = false;
+         $data->message = "No data is available.";
+     }
+    else {
+        $data = json_decode(file_get_contents($beaufort_file));
+        // read cache
+
+        $data->cached = true;
+        // flag this as cached data
+        
+        // extract the data requested by the user
+        $inmateData = $data->data;
+        $data->data = Array();
+        foreach ($inmateData as $inmate){
+            if (property_exists($inmate,'timestamp')) {
+                if ($inmate->timestamp >= $userStart && $inmate->timestamp <= $userEnd) {
+                    $data->data[] = $inmate;
+                };
+            };
+        };
+    }      
+        header('Content-Type: application/json');
+        echo json_encode( $data );
+        /* debug */
+        //echo json_encode( $test );
+}
+else if ($requested === "lexington") {
+    // this is a call from a front-end,
+    // so fetch cached data
+
+    if (!file_exists($lex_file)) {
+        $data = new stdClass();
+        $data->success = false;
+        $data->message = "No data is available.";
+    }
+    else {
+        $data = json_decode(file_get_contents($lex_file));
+        // read cache
+
+        $data->cached = true;
+        // flag this as sourced from cache
+
         // extract only the data needed by the user
         $inmateData = $data->data;
         $data->data = Array();
         foreach( $inmateData as $inmate){
             if ( strtotime($inmate->{'disp_arrest_date'}) >= $userStart && strtotime($inmate->{'disp_arrest_date'}) <= $userEnd) {
                 $data->data[] = $inmate;
-                };
-        };
-        // Return data in JSON format.
-        header('Content-Type: application/json');
-        echo json_encode( $data );    
-    }
-}
-else if ($requested === "beaufort") {
-    $file = dirname(__FILE__).'/cache/beaufortcache.txt';
-    $sources = array(
-        0 => array(
-            'agency'	=> 'Beaufort County',
-            //'url'		=> 'http://mugshots.bcgov.net/booked3.xml'
-            'url'		=> 'http://mugshots.bcgov.net/booked90.xml'
-        )
-    );
-
-    if (!file_exists('cache'))
-        mkdir('cache');
-
-        $startTarget = strtotime("-90 days 0:0:0", strtotime('now'));
-        $endTarget = strtotime("0 days 0:0:0", strtotime('now'));
-        $userStart = strtotime("$start days 0:0:0", strtotime('now'));
-        $userEnd = strtotime("$end days 0:0:0", strtotime('now'));
-
-    /* debug */
-    //$test = array();
-
-    /*  App  */
-    // does the cache file exist, or is it stale? 
-    // Beaufort County retrieval is less expensive to 
-    // the server so we'll refresh more often
-    if (!file_exists($file) || time()-filemtime($file) > 1*3600) {
-        $i = 0;
-        foreach ($sources as $source) {
-            $data[$i]['agency'] = $source['agency'];
-            $data[$i]['url'] = $source['url'];
-            $data[$i]['success'] = true;
-            $xml = simplexml_load_file($source['url']);
-            $data[$i]['data'] = array();
-            $j = 0;
-            foreach ($xml->ins->in as $inmate) {
-                $booked = date_create_from_format('G:i:s m/d/y', (string) $inmate->bd);
-                $timestamp = strtotime($booked->setTime(0, 0, 0)->format('Y-m-d H:i:s'));
-
-                // Only process inmates for the date target window.
-                if ($timestamp >= $startTarget && $timestamp <= $endTarget) {
-
-                /* debug */
-                    //$test[] = $inmate;
-
-                    $name_last = (string) $inmate->nl;
-                    $name_first = (string) $inmate->nf;
-                    $name_middle = (string) $inmate->nm;
-
-                    $data[$i]['data'][$j]['last'] = $name_last;
-                    $data[$i]['data'][$j]['first'] = $name_first;
-                    $data[$i]['data'][$j]['middle'] = $name_middle;
-
-
-                    // Address.
-                    $data[$i]['data'][$j]['city'] = (string) $inmate->csz;
-
-                    // Race
-                    $data[$i]['data'][$j]['race'] = (string) explode(" / ", $inmate->racegen)[0];
-                
-                    // Gender
-                    $data[$i]['data'][$j]['sex'] = (string) explode(" / ", $inmate->racegen)[1];
-
-                    // Date of birth. Needs a little wrangling because of two-digit pre-epoch years;
-                    // strtotime() is not reliable since it maps values between 0-69 to 2000-2069
-                    // and values between 70-100 to 1970-2000.
-                    // Helped here by fact that we also get their age so we can just subtract
-                    // age from current year to yield birth year
-                    $dob = explode("/", $inmate->dob);
-                    $inmate->dob = $dob[0]."/".$dob[1]."/".(date("Y") - $inmate->age);
-                    $data[$i]['data'][$j]['dob'] = (string) date("M j, Y", strtotime($inmate->dob));
-                
-                    // Age.
-                    $data[$i]['data'][$j]['age'] = (string) $inmate->age;
-
-                    // Height.
-                    $data[$i]['data'][$j]['height'] = (string) $inmate->ht;
-
-                    // Weight.
-                    $data[$i]['data'][$j]['weight'] = (string) $inmate->wt;
-
-                    // Mugshot: make sure it's an actual image file.
-                    $url_mug = (string) $inmate->image1['src'];
-                    if (preg_match('/\.(jpeg|jpg|png|gif)$/i', $url_mug)) {
-                        $data[$i]['data'][$j]['photo'] = $url_mug;
-                    }
-                    $data[$i]['data'][$j]['timestamp'] = $timestamp;
-                    // arrest info
-                    // is there any?
-                    if (array_key_exists("ar", $inmate)) {
-                        $data[$i]['data'][$j]['arrestinfo'][]['present'] = (boolean) true;
-                        $data[$i]['data'][$j]['arrestinfo'][] = $inmate->ar;
-                    }
-                    // Booking number.
-                    $data[$i]['data'][$j]['booknum'] = (string) $inmate->bn;
-                
-                    // Booking date and time.
-                    $data[$i]['data'][$j]['booktime'] = (string) date("g:i a, M j, Y", strtotime($inmate->bd));
-
-                    // Release date
-                    $data[$i]['data'][$j]['reldate'] = ($inmate->dtout == "Confined") ? (string) "Confined" : (string) date("g:i a", strtotime($inmate->tmout)).", ".date("M j, Y", strtotime($inmate->dtout));
-                
-                    // Inmate number.
-                    $data[$i]['data'][$j]['inmatenum'] = (string) $inmate->nn;
-
-                    $j++;
-                }
-            }
-            $i++;
-        }
-        // cache this 90 days' worth of data
-        $data[0]['cached'] = false;
-        $data_to_cache = json_encode($data[0],true);
-        file_put_contents($file,$data_to_cache);
-
-        // send back only data requested
-        $inmateData = $data[0]['data'];
-        $data[0]['data'] = Array();
-        foreach ($inmateData as $inmate) {
-
-                if ($inmate['timestamp'] >= $userStart && $inmate['timestamp'] <= $userEnd) {
-                    $data[0]['data'][] = $inmate;
-                }
-        };
-        header('Content-Type: application/json');
-        echo json_encode( $data[0] );
-    
-    } // end cache is non-existent or stale condition
-    else {
-        // get the cached data
-        $data = json_decode(file_get_contents($file));
-        // flag this as cached data
-        $data->cached = true;
-    // extract the data requested by the user
-    $inmateData = $data->data;
-    $data->data = Array();
-    foreach ($inmateData as $inmate){
-                if (property_exists($inmate,'timestamp')) {
-                    if ($inmate->timestamp >= $userStart && $inmate->timestamp <= $userEnd) {
-                        $data->data[] = $inmate;
-                    };
             };
-    };
-        header('Content-Type: application/json');
-        echo json_encode( $data );
-        /* debug */
-        //echo json_encode( $test );
+        };
     }
-
+    // Return data in JSON format.
+    header('Content-Type: application/json');
+    echo json_encode( $data );    
 }
+
 else {
     $data = Array();
     $data['success'] = false;
     $data['data'] = "No valid agency was requested.";
     header('Content-Type: application/json');
     echo json_encode( $data); 
-}
+};
 /* debug */
 //echo json_encode( $test );
