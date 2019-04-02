@@ -13,10 +13,6 @@
  */
 
 
-// cron job commands would be something like:
-//  php -q /var/www/html/bookings.thestate.com/index.php?requested=beaufort
-//  php -q /var/www/html/bookings.thestate.com/index.php?requested=lexington
-
 // allow cross origin resource sharing
 header("Access-Control-Allow-Origin: *");
 
@@ -175,7 +171,9 @@ if ($requested === "all" || $requested === "test") {
             /* curl init */
             /* debug */
             // logging headers
-            //$curlLog = fopen('./logs/curlLog.txt','w');
+            // if (!file_exists('logs'))
+            //     mkdir('logs');
+            // $curlLog = fopen('./logs/curlLog.txt','w');
             
             /* remove any existing cookie */  
             {
@@ -187,6 +185,7 @@ if ($requested === "all" || $requested === "test") {
 
             /* GET homepage to retrieve session and form state values */
             $ch = curl_init($source['main']);
+            echo $ch;
             curl_setopt_array($ch, array(
                 CURLOPT_RETURNTRANSFER => true,
                 CURLOPT_REFERER => $source['main'],
@@ -196,7 +195,7 @@ if ($requested === "all" || $requested === "test") {
 
             $home = curl_exec($ch);
             curl_close($ch);
-
+         
             if (!$home)
                 $data[$i]->scrapeError = curl_error($ch);
 
@@ -391,7 +390,7 @@ if ($requested === "all" || $requested === "test") {
                         $raw_mug = curl_exec($chMug);
                         if (!$raw_mug) {
                             $inmate->mugError = curl_error($chMug);
-                            $inmate->image = "http://media.islandpacket.com/static/news/crime/mugshots/noPhoto.jpg";
+                            $inmate->image = "https://media.islandpacket.com/static/news/crime/mugshots/noPhoto.jpg";
                         }
                         else {
                             // make the file instead of sending it
@@ -404,7 +403,7 @@ if ($requested === "all" || $requested === "test") {
                             unset($raw_mug);
 
                             if (!$mug) {
-                                $img_data = "http://media.islandpacket.com/static/news/crime/mugshots/noPhoto.jpg";
+                                $img_data = "https://media.islandpacket.com/static/news/crime/mugshots/noPhoto.jpg";
                             } 
                             else {
                                 // start buffering and catch image output
